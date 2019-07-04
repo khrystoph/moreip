@@ -2,10 +2,14 @@
 package main
 
 import (
+	"crypto/tls"
+	"flag"
 	"io"
 	"log"
 	"net/http"
 	"os"
+
+	"golang.org/x/crypto/acme/autocert"
 )
 
 var (
@@ -17,11 +21,13 @@ var (
 	infoHandle    io.Writer = os.Stdout
 	warningHandle io.Writer = os.Stderr
 	errorHandle   io.Writer = os.Stderr
+	domain        string
 )
 
 const (
-	cert = "cert.pem"
-	key  = "key.pem"
+	cert    = "cert.pem"
+	key     = "key.pem"
+	certDir = "certs"
 )
 
 func init() {
@@ -41,14 +47,39 @@ func init() {
 		"ERROR: ",
 		log.Ldate|log.Ltime|log.Lshortfile)
 
+	flag.StringVar(&domain, "d", "example.com", "enter your fully qualified domain name here. Default: example.com")
+	flag.StringVar(&domain, "domain", "example.com", "enter your fully qualified domain name here. Default: example.com")
+
 }
 
 func main() {
+	flag.Parse()
+
+	if domain == "example.com" {
+		Error.Fatal("Please set the domain via domain flag.")
+	}
+
+	certManager := autocert.Manager{
+		Prompt:     autocert.AcceptTOS,
+		HostPolicy: autocert.HostWhitelist(domain),
+		Cache:      autocert.DirCache(certDir),
+	}
+
+	//TODO: add handler function for jpeg
+
 	http.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
 		io.WriteString(w, req.RemoteAddr)
 	})
 
-	err := http.ListenAndServeTLS(":443", cert, key, nil)
-	Error.Fatal(err)
+	moreIPServer := &http.Server{
+		Addr: ":https",
+		TLSConfig: &tls.Config{
+			GetCertificate: certManager.GetCertificate,
+		},
+	}
+
+	go http.ListenAndServe(":http", certManager.HTTPHandler(nil))
+
+	log.Fatal(moreIPServer.ListenAndServeTLS("", ""))
 	return
 }
