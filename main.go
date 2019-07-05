@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"golang.org/x/crypto/acme/autocert"
 )
@@ -25,8 +26,6 @@ var (
 )
 
 const (
-	cert    = "cert.pem"
-	key     = "key.pem"
 	certDir = "certs"
 )
 
@@ -68,7 +67,11 @@ func main() {
 	//TODO: add handler function for jpeg
 
 	http.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
-		io.WriteString(w, req.RemoteAddr)
+		if string(req.RemoteAddr[0]) == "[" {
+			io.WriteString(w, strings.Trim(strings.Split(req.RemoteAddr, "]")[0], "[]")+"\n")
+		} else {
+			io.WriteString(w, strings.Split(req.RemoteAddr, ":")[0]+"\n")
+		}
 	})
 
 	moreIPServer := &http.Server{
