@@ -26,7 +26,8 @@ var (
 )
 
 const (
-	certDir = "certs"
+	certDir     = "certs"
+	moreIPImage = "moreip.jpg"
 )
 
 func init() {
@@ -58,13 +59,20 @@ func main() {
 		Error.Fatal("Please set the domain via domain flag.")
 	}
 
+	ipv4 := strings.Join([]string{"ipv4", domain}, ".")
+	ipv6 := strings.Join([]string{"ipv6", domain}, ".")
+
 	certManager := autocert.Manager{
 		Prompt:     autocert.AcceptTOS,
-		HostPolicy: autocert.HostWhitelist(domain),
+		HostPolicy: autocert.HostWhitelist(domain, ipv4, ipv6),
 		Cache:      autocert.DirCache(certDir),
 	}
 
 	//TODO: add handler function for jpeg
+
+	//http.HandleFunc("/moreip", func(w http.ResponseWriter, req *http.Request) {
+	//	img, err := os.Open(moreIPImage)
+	//})
 
 	http.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
 		if string(req.RemoteAddr[0]) == "[" {
