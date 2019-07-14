@@ -1,5 +1,5 @@
 //moreip returns your ipv4 or ipv6 address.
-package main
+package moreip
 
 import (
 	"crypto/tls"
@@ -10,19 +10,24 @@ import (
 	"os"
 	"strings"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3"
 	"golang.org/x/crypto/acme/autocert"
 )
 
 var (
-	Trace         *log.Logger
-	Info          *log.Logger
-	Warning       *log.Logger
-	Error         *log.Logger
-	traceHandle   io.Writer
-	infoHandle    io.Writer = os.Stdout
-	warningHandle io.Writer = os.Stderr
-	errorHandle   io.Writer = os.Stderr
-	domain        string
+	Trace                             *log.Logger
+	Info                              *log.Logger
+	Warning                           *log.Logger
+	Error                             *log.Logger
+	traceHandle                       io.Writer
+	infoHandle                        io.Writer = os.Stdout
+	warningHandle                     io.Writer = os.Stderr
+	errorHandle                       io.Writer = os.Stderr
+	domain, sessionProfile, awsRegion string
+	sess                              *session.Session
 )
 
 const (
@@ -49,18 +54,63 @@ func init() {
 
 	flag.StringVar(&domain, "d", "example.com", "enter your fully qualified domain name here. Default: example.com")
 	flag.StringVar(&domain, "domain", "example.com", "enter your fully qualified domain name here. Default: example.com")
+	flag.StringVar(&sessionProfile, "profile", "default", "enter the profile you wish to use to connect. Default: default")
+	flag.StringVar(&sessionProfile, "p", "default", "enter the profile you wish to use to connect. Default: default")
+	flag.StringVar(&awsRegion, "region", "us-east-1", "Enter region you wish to connect with. Default: us-east-1")
 
+}
+
+func awsSessionHandler(config *aws.Config) (err error) {
+	sess, err = session.NewSession(config)
+	if err != nil {
+		Error.Println("Error creating session.")
+		return err
+	}
+
+	_, err = sess.Config.Credentials.Get()
+	if err != nil {
+		Error.Println("error retrieving credentials. Profile name: ", sessionProfile)
+		Error.Println("Error msg: ", err)
+		return err
+	}
+
+	return nil
+}
+
+func cacheHandler(sess *session.Session, cert string) (err error) {
+	svc := s3.New(sess)
+
+	svc.ListObjectsV2()
+	if _, err := os.Stat("certs"); os.IsNotExist(err) {
+		os.Mkdir("certs", 700)
+	}
+	return nil
 }
 
 func main() {
 	flag.Parse()
+	var (
+		awsConfig = aws.Config{
+			Region:      aws.String(awsRegion),
+			Credentials: credentials.NewSharedCredentials("", sessionProfile),
+		}
+	)
 
 	if domain == "example.com" {
 		Error.Fatal("Please set the domain via domain flag.")
 	}
 
+	err := awsSessionHandler(&awsConfig)
+	if err != nil {
+		Error.Fatalln(err)
+	}
+
 	ipv4 := strings.Join([]string{"ipv4", domain}, ".")
 	ipv6 := strings.Join([]string{"ipv6", domain}, ".")
+
+	if _, err := os.Stat("certs/" + ipv4); os.IsNotExist(err) {
+		cacheHandler(sess, ipv4)
+	}
 
 	certManager := autocert.Manager{
 		Prompt:     autocert.AcceptTOS,
