@@ -1,19 +1,20 @@
-//moreip returns your ipv4 or ipv6 address.
+//Package moreip returns your ipv4 or ipv6 address.
 package moreip
 
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"s3PStore"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
 	"golang.org/x/crypto/acme/autocert"
 )
 
@@ -77,14 +78,11 @@ func awsSessionHandler(config *aws.Config) (err error) {
 	return nil
 }
 
-func cacheHandler(sess *session.Session, cert string) (err error) {
-	svc := s3.New(sess)
-
-	svc.ListObjectsV2()
-	if _, err := os.Stat("certs"); os.IsNotExist(err) {
-		os.Mkdir("certs", 700)
+func cacheHandler(session *session) (err error){
+	if certList, err := s3PStore.ListObjects(awsRegion, sessionProfile); err != nil {
+		return err
 	}
-	return nil
+	if err := s3PStore.PullObjects(certList)
 }
 
 func main() {
@@ -109,7 +107,7 @@ func main() {
 	ipv6 := strings.Join([]string{"ipv6", domain}, ".")
 
 	if _, err := os.Stat("certs/" + ipv4); os.IsNotExist(err) {
-		cacheHandler(sess, ipv4)
+		cacheHandler(sess)
 	}
 
 	certManager := autocert.Manager{
@@ -132,6 +130,7 @@ func main() {
 		}
 	})
 
+	certList := os.Readdir(certDir)
 	moreIPServer := &http.Server{
 		Addr: ":https",
 		TLSConfig: &tls.Config{
@@ -140,6 +139,16 @@ func main() {
 	}
 
 	go http.ListenAndServe(":http", certManager.HTTPHandler(nil))
+
+	for certFile := range certList {
+		info, err := os.Stat(certFile)
+		if info.ModTime != certFile.ModTime {
+			err = s3pstore.pushCerts(certFile, s3bucket)
+			if err != nil {
+				fmt.Println(err)
+			}
+		}
+	}
 
 	log.Fatal(moreIPServer.ListenAndServeTLS("", ""))
 	return
