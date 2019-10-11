@@ -1,5 +1,5 @@
 //moreip returns your ipv4 or ipv6 address.
-package moreip
+package main
 
 import (
 	"crypto/tls"
@@ -8,26 +8,30 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"s3pstore"
 	"strings"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
 	"golang.org/x/crypto/acme/autocert"
 )
 
 var (
-	Trace                             *log.Logger
-	Info                              *log.Logger
-	Warning                           *log.Logger
-	Error                             *log.Logger
-	traceHandle                       io.Writer
-	infoHandle                        io.Writer = os.Stdout
-	warningHandle                     io.Writer = os.Stderr
-	errorHandle                       io.Writer = os.Stderr
-	domain, sessionProfile, awsRegion string
-	sess                              *session.Session
+	//Trace is log handling for Trace level messages
+	Trace *log.Logger
+	//Info is log handling for Info level messaging
+	Info *log.Logger
+	//Warning is log handling for Warning level messaging
+	Warning *log.Logger
+	//Error is log handling for Error level messaging
+	Error                                                   *log.Logger
+	traceHandle                                             io.Writer
+	infoHandle                                              io.Writer = os.Stdout
+	warningHandle                                           io.Writer = os.Stderr
+	errorHandle                                             io.Writer = os.Stderr
+	s3bucket, filePrefix, domain, sessionProfile, awsRegion string
+	sess                                                    *session.Session
 )
 
 const (
@@ -54,10 +58,13 @@ func init() {
 
 	flag.StringVar(&domain, "d", "example.com", "enter your fully qualified domain name here. Default: example.com")
 	flag.StringVar(&domain, "domain", "example.com", "enter your fully qualified domain name here. Default: example.com")
+	flag.StringVar(&awsRegion, "region", "us-east-1", "Enter region you wish to connect with. Default: us-east-1")
+	flag.StringVar(&awsRegion, "r", "us-east-1", "Enter region you wish to connect with. Default: us-east-1")
+	flag.StringVar(&s3bucket, "bucket", "moreip.jbecomputersolutions.com", "Enter your s3 bucket to pull from here.")
+	flag.StringVar(&s3bucket, "b", "moreip.jbecomputersolutions.com", "Enter your s3 bucket to pull from here.")
+	flag.StringVar(&filePrefix, "prefix", "certs", "Enter the object prefix where you stored the certs.")
 	flag.StringVar(&sessionProfile, "profile", "default", "enter the profile you wish to use to connect. Default: default")
 	flag.StringVar(&sessionProfile, "p", "default", "enter the profile you wish to use to connect. Default: default")
-	flag.StringVar(&awsRegion, "region", "us-east-1", "Enter region you wish to connect with. Default: us-east-1")
-
 }
 
 func awsSessionHandler(config *aws.Config) (err error) {
@@ -77,16 +84,6 @@ func awsSessionHandler(config *aws.Config) (err error) {
 	return nil
 }
 
-func cacheHandler(sess *session.Session, cert string) (err error) {
-	svc := s3.New(sess)
-
-	svc.ListObjectsV2()
-	if _, err := os.Stat("certs"); os.IsNotExist(err) {
-		os.Mkdir("certs", 700)
-	}
-	return nil
-}
-
 func main() {
 	flag.Parse()
 	var (
@@ -95,6 +92,9 @@ func main() {
 			Credentials: credentials.NewSharedCredentials("", sessionProfile),
 		}
 	)
+
+	s3pstore.FilePrefix = filePrefix
+	s3pstore.S3bucket = s3bucket
 
 	if domain == "example.com" {
 		Error.Fatal("Please set the domain via domain flag.")
@@ -109,7 +109,10 @@ func main() {
 	ipv6 := strings.Join([]string{"ipv6", domain}, ".")
 
 	if _, err := os.Stat("certs/" + ipv4); os.IsNotExist(err) {
-		cacheHandler(sess, ipv4)
+		err := s3pstore.CacheHandler(sess, ipv4)
+		if err != nil {
+			Error.Println(err)
+		}
 	}
 
 	certManager := autocert.Manager{
@@ -142,5 +145,9 @@ func main() {
 	go http.ListenAndServe(":http", certManager.HTTPHandler(nil))
 
 	log.Fatal(moreIPServer.ListenAndServeTLS("", ""))
+	err = s3pstore.CacheHandler(sess, ipv4)
+	if err != nil {
+		Error.Println(err)
+	}
 	return
 }
