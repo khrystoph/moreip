@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
+	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 )
 
@@ -119,6 +120,7 @@ func main() {
 		Prompt:     autocert.AcceptTOS,
 		HostPolicy: autocert.HostWhitelist(domain, ipv4, ipv6),
 		Cache:      autocert.DirCache(certDir),
+		Client:     &acme.Client{DirectoryURL: "https://acme-v02.api.letsencrypt.org/directory"},
 	}
 
 	//TODO: add handler function for jpeg
