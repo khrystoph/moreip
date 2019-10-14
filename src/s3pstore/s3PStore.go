@@ -3,11 +3,11 @@ package s3pstore
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -15,14 +15,17 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/credentials/ec2rolecreds"
+	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 )
 
 const (
-	certDir   = "certs"
-	awsRegion = "us-west-2"
+	certDir     = "certs"
+	awsRegion   = "us-west-2"
+	maxKeyCount = 3
 )
 
 var (
@@ -44,30 +47,96 @@ var (
 	infoHandle    io.Writer = os.Stdout
 	warningHandle io.Writer = os.Stderr
 	errorHandle   io.Writer = os.Stderr
+	sessionMust             = session.Must(session.NewSession(&aws.Config{
+		Region: aws.String(awsRegion),
+	}))
+	ec2RoleProvider = &ec2rolecreds.EC2RoleProvider{
+		Client: ec2metadata.New(sessionMust, &aws.Config{
+			HTTPClient: &http.Client{Timeout: 10 * time.Second},
+		}),
+		ExpiryWindow: 0,
+	}
+	//sharedCreds = &credentials.SharedCredentialsProvider{}
+	creds     = credentials.NewChainCredentials([]credentials.Provider{ec2RoleProvider})
+	awsConfig = &aws.Config{
+		Region:      aws.String(awsRegion),
+		Credentials: creds,
+	}
 )
+
+func init() {
+	Trace = log.New(traceHandle,
+		"TRACE: ",
+		log.Ldate|log.Ltime|log.Lshortfile)
+
+	Info = log.New(infoHandle,
+		"INFO: ",
+		log.Ldate|log.Ltime|log.Lshortfile)
+
+	Warning = log.New(warningHandle,
+		"WARNING: ",
+		log.Ldate|log.Ltime|log.Lshortfile)
+
+	Error = log.New(errorHandle,
+		"ERROR: ",
+		log.Ldate|log.Ltime|log.Lshortfile)
+}
 
 type certStruct struct {
 	name    string
 	modTime time.Time
 }
 
-func listOjbects() (objectList *s3.ListObjectsOutput, err error) {
-	sess, err := session.NewSession(&aws.Config{
-		Region:      aws.String(awsRegion),
-		Credentials: credentials.NewSharedCredentials("", sessionProfile),
-	})
+func awsSessionHandler(config *aws.Config, creds *credentials.Credentials) (err error) {
+	sess, err = session.NewSession(awsConfig)
+	if err != nil {
+		Error.Println("Error creating session.")
+		return err
+	}
+
+	_, err = sess.Config.Credentials.Get()
+	if err != nil {
+		Error.Println("error retrieving credentials. Profile name: ", sessionProfile)
+		Error.Println("Error msg: ", err)
+		return err
+	}
+
+	return nil
+}
+
+//IsEmpty checks if the directory is empty to determine if we should pull certs or push certs
+func IsEmpty(name string) (bool, error) {
+	f, err := os.Open(name)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	_, err = f.Readdirnames(1) // Or f.Readdir(1)
+	if err == io.EOF {
+		return true, nil
+	}
+	return false, err // Either not empty or error, suits both cases
+}
+
+func listObjects() (objectList *s3.ListObjectsV2Output, err error) {
+	err = awsSessionHandler(awsConfig, creds)
 	if err != nil {
 		fmt.Println("Error setting up session.", err)
-		os.Exit(1)
+		return nil, err
 	}
 	svc := s3.New(sess)
-	input := &s3.ListObjectsInput{
+	Info.Printf("s3 bucket:%v\n", S3bucket)
+	Info.Printf("FilePrefix: %v\n", FilePrefix)
+	input := &s3.ListObjectsV2Input{
 		Bucket:  &S3bucket,
-		MaxKeys: aws.Int64(2),
+		MaxKeys: aws.Int64(maxKeyCount),
 		Prefix:  &FilePrefix,
 	}
 
-	result, err := svc.ListObjects(input)
+	Info.Printf("listObjectsInput:\n%v\n", input)
+
+	result, err := svc.ListObjectsV2(input)
 	if err != nil {
 		if aerr, ok := err.(awserr.Error); ok {
 			switch aerr.Code() {
@@ -91,11 +160,8 @@ func listOjbects() (objectList *s3.ListObjectsOutput, err error) {
 }
 
 //syncObjects pulls (or pushes) objects to or from s3 bucket/prefix.
-func pullObjects(certs *s3.ListObjectsOutput) (err error) {
-	sess, err := session.NewSession(&aws.Config{
-		Region:      aws.String(awsRegion),
-		Credentials: credentials.NewSharedCredentials("", sessionProfile),
-	})
+func pullObjects(certs *s3.ListObjectsV2Output) (err error) {
+	err = awsSessionHandler(awsConfig, creds)
 	if err != nil {
 		return err
 	}
@@ -106,6 +172,10 @@ func pullObjects(certs *s3.ListObjectsOutput) (err error) {
 		return err
 	}
 	downloader := s3manager.NewDownloader(sess)
+	if len(certs.Contents) == 1 && *certs.Contents[0].Key == "certs/" {
+		return errors.New("cert contents list only contains directory")
+	}
+	Info.Printf("%v\n", certs)
 	for object := range certs.Contents {
 		input := &s3.GetObjectInput{
 			Bucket: &S3bucket,
@@ -130,10 +200,7 @@ func pullObjects(certs *s3.ListObjectsOutput) (err error) {
 }
 
 func pushCerts(cert string, bucket string) (err error) {
-	sess, err := session.NewSession(&aws.Config{
-		Region:      aws.String(awsRegion),
-		Credentials: credentials.NewSharedCredentials("", sessionProfile),
-	})
+	err = awsSessionHandler(awsConfig, creds)
 
 	if err != nil {
 		return err
@@ -144,6 +211,8 @@ func pushCerts(cert string, bucket string) (err error) {
 	if err != nil {
 		return err
 	}
+
+	Info.Println(FilePrefix)
 
 	s3objectKey := FilePrefix + "/" + cert
 	result, err := uploader.Upload(&s3manager.UploadInput{
@@ -159,49 +228,74 @@ func pushCerts(cert string, bucket string) (err error) {
 	return nil
 }
 
-func awsSessionHandler(config *aws.Config) (err error) {
-	sess, err := session.NewSession(config)
-	if err != nil {
-		Error.Println("Error creating session.")
-		return err
-	}
-
-	_, err = sess.Config.Credentials.Get()
-	if err != nil {
-		Error.Println("error retrieving credentials. Profile name: ", sessionProfile)
-		Error.Println("Error msg: ", err)
-		return err
-	}
-
-	return nil
-}
-
 //CacheHandler is a function that handles pushing and pulling certs from s3 to handle SSL/TLS for the http server
-func CacheHandler(sess *session.Session, cert string) (err error) {
+func CacheHandler(cert string) (err error) {
 	var fileModTime []certStruct
-	flag.Parse()
 
-	certList, err := listOjbects()
+	Info.Println("cache handler test")
+
+	certList, err := listObjects()
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		Error.Printf("%v\n", certList)
+		Error.Printf("error calling listObjects\n")
+		Error.Printf("%v\n", err)
 	}
-	err = pullObjects(certList)
+	for index, certKeyIndex := range certList.Contents {
+		if *certKeyIndex.Key == "certs/" {
+			certList.Contents[index] = certList.Contents[len(certList.Contents)-1]
+			certList.Contents[len(certList.Contents)-1] = nil
+			certList.Contents = certList.Contents[:len(certList.Contents)-1]
+		}
+
+	}
+	Info.Printf("certList:\n%v\n", certList)
+	if certList != nil {
+		err = pullObjects(certList)
+		if err != nil {
+			Error.Println("error calling pull objects")
+			Error.Printf("%v\n", certList)
+			fmt.Println(err)
+			return err
+		}
+	}
+
+	Info.Println("Made it to the cacheFileList and certListMappings.")
+	cacheFileList, err := ioutil.ReadDir(certDir)
+	Info.Printf("CacheFileList:\n%v\n", cacheFileList)
 	if err != nil {
-		fmt.Println(err)
+		Error.Println("encountered error listing certs dir.")
 		return err
 	}
-	cacheFileList, err := ioutil.ReadDir(certDir)
+	certListMap := make(map[string]string)
 
 	for _, certFile := range cacheFileList {
 		info, name := certFile.ModTime(), certFile.Name()
 		fileModTime = append(fileModTime, certStruct{name: name, modTime: info})
 	}
-	//fmt.Printf("%v", fileStatModTime)
 
+	if certList == nil && len(fileModTime) != 0 {
+		Info.Printf("Cert List: %v\n", certList)
+		for _, cert := range fileModTime {
+			pushCerts(cert.name, S3bucket)
+		}
+	}
+
+	if certList != nil {
+		Info.Printf("Entering into certMap loop.\n")
+		for object := range certList.Contents {
+			certListMap[*certList.Contents[object].Key] = *certList.Contents[object].Key
+		}
+	}
+
+	Info.Printf("Entering into push certs loop.\n")
 	for index, certFile := range fileModTime {
 		certStat, err := os.Stat(FilePrefix + "/" + certFile.name)
 		info, name := certStat.ModTime(), certStat.Name()
+
+		if certname, ok := certListMap[name]; !ok {
+			pushCerts(certname, S3bucket)
+		}
+
 		if fileModTime[index].name != name {
 			fmt.Println("file names do not match. Panic.")
 			//os.Exit(1)
@@ -219,5 +313,6 @@ func CacheHandler(sess *session.Session, cert string) (err error) {
 			}
 		}
 	}
+	Info.Printf("Exiting CacheHandler\n")
 	return nil
 }

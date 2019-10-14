@@ -10,11 +10,11 @@ import (
 	"os"
 	"s3pstore"
 	"strings"
+	"sync"
+	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
-	"golang.org/x/crypto/acme"
+	"github.com/aws/aws-sdk-go/service/s3"
 	"golang.org/x/crypto/acme/autocert"
 )
 
@@ -33,11 +33,15 @@ var (
 	errorHandle                                             io.Writer = os.Stderr
 	s3bucket, filePrefix, domain, sessionProfile, awsRegion string
 	sess                                                    *session.Session
+	s3Sess                                                  *s3.S3
 )
 
 const (
 	certDir     = "certs"
 	moreIPImage = "moreip.jpg"
+	//ProviderName is an exported const to identify when the EC2RoleProvider is being used
+	ProviderName = "EC2RoleProvider"
+	sleepConst   = 5
 )
 
 func init() {
@@ -68,31 +72,8 @@ func init() {
 	flag.StringVar(&sessionProfile, "p", "default", "enter the profile you wish to use to connect. Default: default")
 }
 
-func awsSessionHandler(config *aws.Config) (err error) {
-	sess, err = session.NewSession(config)
-	if err != nil {
-		Error.Println("Error creating session.")
-		return err
-	}
-
-	_, err = sess.Config.Credentials.Get()
-	if err != nil {
-		Error.Println("error retrieving credentials. Profile name: ", sessionProfile)
-		Error.Println("Error msg: ", err)
-		return err
-	}
-
-	return nil
-}
-
 func main() {
 	flag.Parse()
-	var (
-		awsConfig = aws.Config{
-			Region:      aws.String(awsRegion),
-			Credentials: credentials.NewSharedCredentials("", sessionProfile),
-		}
-	)
 
 	s3pstore.FilePrefix = filePrefix
 	s3pstore.S3bucket = s3bucket
@@ -101,16 +82,20 @@ func main() {
 		Error.Fatal("Please set the domain via domain flag.")
 	}
 
-	err := awsSessionHandler(&awsConfig)
-	if err != nil {
-		Error.Fatalln(err)
-	}
-
 	ipv4 := strings.Join([]string{"ipv4", domain}, ".")
 	ipv6 := strings.Join([]string{"ipv6", domain}, ".")
 
+	Info.Println("ipv4: " + ipv4)
+	Info.Println("ipv6: " + ipv6)
+
 	if _, err := os.Stat("certs/" + ipv4); os.IsNotExist(err) {
-		err := s3pstore.CacheHandler(sess, ipv4)
+		Info.Println("certs do not exist. Creating them.")
+		if _, err := os.Stat("certs"); os.IsNotExist(err) {
+			Info.Println("certs dir does not exist. creating")
+			os.Mkdir("certs", 0755)
+		}
+		Info.Println("entering cache handler.")
+		err := s3pstore.CacheHandler(ipv4)
 		if err != nil {
 			Error.Println(err)
 		}
@@ -120,7 +105,6 @@ func main() {
 		Prompt:     autocert.AcceptTOS,
 		HostPolicy: autocert.HostWhitelist(domain, ipv4, ipv6),
 		Cache:      autocert.DirCache(certDir),
-		Client:     &acme.Client{DirectoryURL: "https://acme-v02.api.letsencrypt.org/directory"},
 	}
 
 	//TODO: add handler function for jpeg
@@ -144,12 +128,44 @@ func main() {
 		},
 	}
 
-	go http.ListenAndServe(":http", certManager.HTTPHandler(nil))
+	var wg sync.WaitGroup
+	go func() {
+		wg.Add(1)
+		defer wg.Done()
+		http.ListenAndServe(":http", certManager.HTTPHandler(nil))
+	}()
 
-	log.Fatal(moreIPServer.ListenAndServeTLS("", ""))
-	err = s3pstore.CacheHandler(sess, ipv4)
-	if err != nil {
-		Error.Println(err)
+	Info.Printf("Starting the main TLS server.\n")
+	go func() {
+		log.Fatal(moreIPServer.ListenAndServeTLS("", ""))
+	}()
+	Info.Printf("Entering into cache handling infinite loop.\n")
+	loopCounter := 0
+	for true {
+		loopCounter++
+		Info.Printf("cacheHandling loop at end of program #%v.\n", loopCounter)
+		if _, err := os.Stat("certs/" + ipv4); os.IsNotExist(err) {
+			err := s3pstore.CacheHandler(ipv4)
+			if err != nil {
+				Error.Println(err)
+			}
+		}
+		if _, err := os.Stat("certs/" + ipv6); os.IsNotExist(err) {
+			err := s3pstore.CacheHandler(ipv6)
+			if err != nil {
+				Error.Println(err)
+			}
+		}
+		Info.Printf("certs/" + domain)
+		if _, err := os.Stat("certs/" + domain); os.IsNotExist(err) {
+			err := s3pstore.CacheHandler(domain)
+			if err != nil {
+				Error.Println(err)
+			}
+		}
+		time.Sleep(sleepConst * time.Second)
 	}
+	wg.Wait()
+
 	return
 }
