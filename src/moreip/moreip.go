@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -88,17 +89,46 @@ func main() {
 	Info.Println("ipv4: " + ipv4)
 	Info.Println("ipv6: " + ipv6)
 
-	if _, err := os.Stat("certs/" + ipv4); os.IsNotExist(err) {
-		Info.Println("certs do not exist. Creating them.")
-		if _, err := os.Stat("certs"); os.IsNotExist(err) {
-			Info.Println("certs dir does not exist. creating")
-			os.Mkdir("certs", 0755)
-		}
-		Info.Println("entering cache handler.")
-		err := s3pstore.CacheHandler(ipv4)
+	if _, err := os.Stat("certs"); os.IsNotExist(err) {
+		Info.Println("certs dir does not exist. Creating it and calling pullCache.")
+		os.Mkdir("certs", 0755)
+		Info.Println("pulling certs if they exist in cache.")
+	}
+
+	//make map to store local cached files in to check against returned objects.
+	//if object in remote cache does not exist in map, pull the cert to the local filesystem.
+	fileMap := make(map[string]os.FileInfo)
+	cachedObjectsMap := make(map[string]s3.Object)
+
+	//if we have file in cache, but not local to filesystem, download it
+	if fileList, err := ioutil.ReadDir("certs"); err != nil {
+		Info.Printf("Had issues reading certs directory\n")
+	} else if len(fileList) > 0 {
+		cachedObjects, err := s3pstore.ListObjects(s3bucket, filePrefix)
 		if err != nil {
-			Error.Println(err)
+			Info.Printf("Error calling list objects: %v\n", err)
 		}
+		for _, files := range fileList {
+			fileMap[files.Name()] = files
+		}
+		//we want to check if the object that we saw in the cache exists on the filesystem, if not, then we
+		//pull the cert down from the cache into the filesystem. We also want to map the cache objects
+		for _, cacheItem := range cachedObjects.Contents {
+			if _, ok := fileMap[*cacheItem.Key]; ok != true {
+				s3pstore.PullObjects(*cacheItem.Key, "certs/")
+			}
+			cachedObjectsMap[*cacheItem.Key] = *cacheItem
+		}
+		Info.Printf("File Map Len:%v\nCached Objects Len:%v\n", len(fileMap), len(cachedObjectsMap))
+		if len(fileMap) > len(cachedObjectsMap) {
+			for _, localToCache := range fileMap {
+				if _, ok := cachedObjectsMap[localToCache.Name()]; !ok {
+					s3pstore.PushCerts(localToCache.Name(), s3bucket)
+				}
+			}
+		}
+	} else if len(fileList) == 0 {
+		s3pstore.CacheHandler(domain)
 	}
 
 	certManager := autocert.Manager{
@@ -129,43 +159,46 @@ func main() {
 	}
 
 	var wg sync.WaitGroup
+
+	Info.Printf("Starting the letsencrypt server\n")
 	go func() {
 		wg.Add(1)
 		defer wg.Done()
 		http.ListenAndServe(":http", certManager.HTTPHandler(nil))
 	}()
 
-	Info.Printf("Starting the main TLS server.\n")
-	go func() {
-		log.Fatal(moreIPServer.ListenAndServeTLS("", ""))
-	}()
 	Info.Printf("Entering into cache handling infinite loop.\n")
 	loopCounter := 0
-	for true {
-		loopCounter++
-		Info.Printf("cacheHandling loop at end of program #%v.\n", loopCounter)
-		if _, err := os.Stat("certs/" + ipv4); os.IsNotExist(err) {
-			err := s3pstore.CacheHandler(ipv4)
-			if err != nil {
-				Error.Println(err)
+	go func() {
+		wg.Add(1)
+		defer wg.Done()
+		for true {
+			loopCounter++
+			Info.Printf("cacheHandling loop at end of program #%v.\n", loopCounter)
+			if _, err := os.Stat("certs/" + ipv4); !os.IsNotExist(err) {
+				err := s3pstore.CacheHandler(ipv4)
+				if err != nil {
+					Error.Println(err)
+				}
 			}
-		}
-		if _, err := os.Stat("certs/" + ipv6); os.IsNotExist(err) {
-			err := s3pstore.CacheHandler(ipv6)
-			if err != nil {
-				Error.Println(err)
+			if _, err := os.Stat("certs/" + ipv6); !os.IsNotExist(err) {
+				err := s3pstore.CacheHandler(ipv6)
+				if err != nil {
+					Error.Println(err)
+				}
 			}
-		}
-		Info.Printf("certs/" + domain)
-		if _, err := os.Stat("certs/" + domain); os.IsNotExist(err) {
-			err := s3pstore.CacheHandler(domain)
-			if err != nil {
-				Error.Println(err)
+			Info.Printf("certs/" + domain)
+			if _, err := os.Stat("certs/" + domain); !os.IsNotExist(err) {
+				err := s3pstore.CacheHandler(domain)
+				if err != nil {
+					Error.Println(err)
+				}
 			}
+			time.Sleep(sleepConst * time.Second)
 		}
-		time.Sleep(sleepConst * time.Second)
-	}
-	wg.Wait()
+	}()
+	Info.Printf("Starting the main TLS server.\n")
+	Error.Fatal(moreIPServer.ListenAndServeTLS("", ""))
 
 	return
 }

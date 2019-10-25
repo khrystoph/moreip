@@ -128,6 +128,49 @@ func listObjects() (objectList *s3.ListObjectsV2Output, err error) {
 	svc := s3.New(sess)
 	Info.Printf("s3 bucket:%v\n", S3bucket)
 	Info.Printf("FilePrefix: %v\n", FilePrefix)
+	prefix := FilePrefix + "/"
+	input := &s3.ListObjectsV2Input{
+		Bucket: &S3bucket,
+		//MaxKeys: aws.Int64(maxKeyCount),
+		Prefix: &prefix,
+	}
+
+	Info.Printf("listObjectsInput:\n%v\n", input)
+
+	result, err := svc.ListObjectsV2(input)
+	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok {
+			switch aerr.Code() {
+			case s3.ErrCodeNoSuchBucket:
+				fmt.Println(s3.ErrCodeNoSuchBucket, aerr.Error())
+			default:
+				fmt.Println(aerr.Error())
+			}
+		} else {
+			// Print the error, cast err to awserr.Error to get the Code and
+			// Message from an error.
+			fmt.Println(awserr.Error(aerr))
+		}
+		return
+	}
+
+	if len(result.Contents) == 0 {
+		return nil, errors.New("no ojbects found in bucket/prefix")
+	}
+	Info.Printf("Exiting listObjects\n")
+	return result, nil
+}
+
+//ListObjects is an exported call to list objects in a bucket
+func ListObjects(S3bucket string, FilePrefix string) (objectList *s3.ListObjectsV2Output, err error) {
+	err = awsSessionHandler(awsConfig, creds)
+	if err != nil {
+		fmt.Println("Error setting up session.", err)
+		return nil, err
+	}
+	svc := s3.New(sess)
+	Info.Printf("s3 bucket:%v\n", S3bucket)
+	Info.Printf("FilePrefix: %v\n", FilePrefix)
 	input := &s3.ListObjectsV2Input{
 		Bucket:  &S3bucket,
 		MaxKeys: aws.Int64(maxKeyCount),
@@ -156,7 +199,46 @@ func listObjects() (objectList *s3.ListObjectsV2Output, err error) {
 	if len(result.Contents) == 0 {
 		return nil, errors.New("no ojbects found in bucket/prefix")
 	}
+	Info.Printf("Exiting listObjects\n")
 	return result, nil
+}
+
+//PullObjects pulls object from s3bucket and stores locally in cache
+func PullObjects(cacheFile string, prefix string) (err error) {
+	err = awsSessionHandler(awsConfig, creds)
+	if err != nil {
+		return err
+	}
+	if _, err = os.Stat(certDir); os.IsNotExist(err) {
+		err = os.Mkdir(certDir, 0755)
+	}
+	if err != nil {
+		return err
+	}
+	inputKey := prefix + cacheFile
+	downloader := s3manager.NewDownloader(sess)
+	Info.Printf("%v\n", cacheFile)
+	input := &s3.GetObjectInput{
+		Bucket:  &S3bucket,
+		Key:     &inputKey,
+		IfMatch: &inputKey,
+	}
+
+	Info.Printf("certfile: %v\n", inputKey)
+	f, err := os.Create(inputKey)
+	if err != nil {
+		return err
+	}
+	cert, err := downloader.Download(f, input)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Downloaded file, %d bytes\n", cert)
+	f.Close()
+	f.Sync()
+
+	Info.Printf("Exiting pullObjects.\n")
+	return nil
 }
 
 //syncObjects pulls (or pushes) objects to or from s3 bucket/prefix.
@@ -195,7 +277,38 @@ func pullObjects(certs *s3.ListObjectsV2Output) (err error) {
 		f.Sync()
 
 	}
+	Info.Printf("Exiting pullObjects.\n")
+	return nil
+}
 
+//PushCerts allows external libraries to push a cert to S3
+func PushCerts(cert string, bucket string) (err error) {
+	err = awsSessionHandler(awsConfig, creds)
+
+	if err != nil {
+		return err
+	}
+
+	uploader := s3manager.NewUploader(sess)
+	f, err := os.Open(FilePrefix + "/" + cert)
+	if err != nil {
+		return err
+	}
+
+	Info.Println(FilePrefix)
+
+	s3objectKey := FilePrefix + "/" + cert
+	result, err := uploader.Upload(&s3manager.UploadInput{
+		Bucket: aws.String(bucket),
+		Key:    &s3objectKey,
+		Body:   f,
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("file uploaded to, %s\n", aws.StringValue(&result.Location))
+	Info.Printf("Exiting pushCerts.")
 	return nil
 }
 
@@ -225,6 +338,7 @@ func pushCerts(cert string, bucket string) (err error) {
 	}
 
 	fmt.Printf("file uploaded to, %s\n", aws.StringValue(&result.Location))
+	Info.Printf("Exiting pushCerts.")
 	return nil
 }
 
@@ -240,14 +354,22 @@ func CacheHandler(cert string) (err error) {
 		Error.Printf("error calling listObjects\n")
 		Error.Printf("%v\n", err)
 	}
-	for index, certKeyIndex := range certList.Contents {
-		if *certKeyIndex.Key == "certs/" {
-			certList.Contents[index] = certList.Contents[len(certList.Contents)-1]
-			certList.Contents[len(certList.Contents)-1] = nil
-			certList.Contents = certList.Contents[:len(certList.Contents)-1]
-		}
+	Info.Printf("Checking list of certs.\n")
+	Info.Printf("ListObjectsOutput:\n%v", certList.Contents)
 
+	//make list of objects in bucket with prefix of "certs/"
+	certListMap := make(map[string]s3.Object)
+	if certList != nil {
+		Info.Printf("Entering into certMap loop.\n")
+		for index, object := range certList.Contents {
+			certListMap[*certList.Contents[index].Key] = *object
+		}
+		if _, ok := certListMap[cert]; ok {
+			pushCerts(cert, S3bucket)
+			return
+		}
 	}
+
 	Info.Printf("certList:\n%v\n", certList)
 	if certList != nil {
 		err = pullObjects(certList)
@@ -266,7 +388,6 @@ func CacheHandler(cert string) (err error) {
 		Error.Println("encountered error listing certs dir.")
 		return err
 	}
-	certListMap := make(map[string]string)
 
 	for _, certFile := range cacheFileList {
 		info, name := certFile.ModTime(), certFile.Name()
@@ -275,15 +396,8 @@ func CacheHandler(cert string) (err error) {
 
 	if certList == nil && len(fileModTime) != 0 {
 		Info.Printf("Cert List: %v\n", certList)
-		for _, cert := range fileModTime {
-			pushCerts(cert.name, S3bucket)
-		}
-	}
-
-	if certList != nil {
-		Info.Printf("Entering into certMap loop.\n")
-		for object := range certList.Contents {
-			certListMap[*certList.Contents[object].Key] = *certList.Contents[object].Key
+		for _, certStruct := range fileModTime {
+			pushCerts(certStruct.name, S3bucket)
 		}
 	}
 
@@ -293,7 +407,7 @@ func CacheHandler(cert string) (err error) {
 		info, name := certStat.ModTime(), certStat.Name()
 
 		if certname, ok := certListMap[name]; !ok {
-			pushCerts(certname, S3bucket)
+			pushCerts(*certname.Key, S3bucket)
 		}
 
 		if fileModTime[index].name != name {
