@@ -42,8 +42,13 @@ const (
 	moreIPImage = "moreip.jpg"
 	//ProviderName is an exported const to identify when the EC2RoleProvider is being used
 	ProviderName = "EC2RoleProvider"
-	sleepConst   = 5
+	sleepConst   = 30
 )
+
+type localFile struct {
+	filename    string
+	fileModTime time.Time
+}
 
 func init() {
 	Trace = log.New(traceHandle,
@@ -172,15 +177,38 @@ func main() {
 	go func() {
 		wg.Add(1)
 		defer wg.Done()
+		localFiles := make(map[string]localFile)
 		for true {
 			loopCounter++
 			Info.Printf("cacheHandling loop at end of program #%v.\n", loopCounter)
-			if _, err := os.Stat("certs/" + ipv4); !os.IsNotExist(err) {
-				err := s3pstore.CacheHandler(ipv4)
-				if err != nil {
-					Error.Println(err)
+			fileList, err := ioutil.ReadDir("certs")
+			if err != nil {
+				Info.Printf("%v\n", err)
+			}
+			if len(fileList) > 0 {
+				for _, files := range fileList {
+					if _, ok := localFiles[files.Name()]; ok != true {
+						localFiles[files.Name()] = localFile{
+							filename:    files.Name(),
+							fileModTime: files.ModTime(),
+						}
+						s3pstore.PushCerts(files.Name(), s3bucket)
+					} else if ok == true && localFiles[files.Name()].fileModTime.Before(files.ModTime()) {
+						localFiles[files.Name()] = localFile{
+							filename:    files.Name(),
+							fileModTime: files.ModTime(),
+						}
+						s3pstore.PushCerts(files.Name(), s3bucket)
+					}
 				}
 			}
+			time.Sleep(sleepConst * time.Second)
+			/*if _, err := os.Stat("certs/" + ipv4); !os.IsNotExist(err) {
+			*	err := s3pstore.CacheHandler(ipv4)
+			*	if err != nil {
+			*		Error.Println(err)
+			*	}
+			*}
 			if _, err := os.Stat("certs/" + ipv6); !os.IsNotExist(err) {
 				err := s3pstore.CacheHandler(ipv6)
 				if err != nil {
@@ -195,6 +223,7 @@ func main() {
 				}
 			}
 			time.Sleep(sleepConst * time.Second)
+			*/
 		}
 	}()
 	Info.Printf("Starting the main TLS server.\n")
