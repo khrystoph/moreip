@@ -5,11 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -33,7 +31,7 @@ var (
 	S3bucket string
 	//FilePrefix is Exported to be set by main
 	FilePrefix     string
-	sessionProfile string
+	SessionProfile string
 	sess           *session.Session
 	//Trace is a setting for logging to allow for a specific log type of trace level logging
 	Trace *log.Logger
@@ -56,8 +54,10 @@ var (
 		}),
 		ExpiryWindow: 0,
 	}
-	//sharedCreds = &credentials.SharedCredentialsProvider{}
-	creds     = credentials.NewChainCredentials([]credentials.Provider{ec2RoleProvider})
+	sharedCreds = &credentials.SharedCredentialsProvider{
+		Profile: SessionProfile,
+	}
+	creds     = credentials.NewChainCredentials([]credentials.Provider{ec2RoleProvider, sharedCreds})
 	awsConfig = &aws.Config{
 		Region:      aws.String(awsRegion),
 		Credentials: creds,
@@ -96,7 +96,7 @@ func awsSessionHandler(config *aws.Config, creds *credentials.Credentials) (err 
 
 	_, err = sess.Config.Credentials.Get()
 	if err != nil {
-		Error.Println("error retrieving credentials. Profile name: ", sessionProfile)
+		Error.Println("error retrieving credentials. Profile name: ", SessionProfile)
 		Error.Println("Error msg: ", err)
 		return err
 	}
@@ -242,7 +242,7 @@ func PullObjects(cacheFile string, prefix string) (err error) {
 }
 
 //syncObjects pulls (or pushes) objects to or from s3 bucket/prefix.
-func pullObjects(certs *s3.ListObjectsV2Output) (err error) {
+/*func pullObjects(certs *s3.ListObjectsV2Output) (err error) {
 	err = awsSessionHandler(awsConfig, creds)
 	if err != nil {
 		return err
@@ -279,7 +279,7 @@ func pullObjects(certs *s3.ListObjectsV2Output) (err error) {
 	}
 	Info.Printf("Exiting pullObjects.\n")
 	return nil
-}
+}*/
 
 //PushCerts allows external libraries to push a cert to S3
 func PushCerts(cert string, bucket string) (err error) {
@@ -312,6 +312,7 @@ func PushCerts(cert string, bucket string) (err error) {
 	return nil
 }
 
+/*
 func pushCerts(cert string, bucket string) (err error) {
 	err = awsSessionHandler(awsConfig, creds)
 
@@ -340,10 +341,10 @@ func pushCerts(cert string, bucket string) (err error) {
 	fmt.Printf("file uploaded to, %s\n", aws.StringValue(&result.Location))
 	Info.Printf("Exiting pushCerts.")
 	return nil
-}
+}*/
 
 //CacheHandler is a function that handles pushing and pulling certs from s3 to handle SSL/TLS for the http server
-func CacheHandler(cert string) (err error) {
+/*func CacheHandler(cert string) (err error) {
 	var fileModTime []certStruct
 
 	Info.Println("cache handler test")
@@ -429,4 +430,4 @@ func CacheHandler(cert string) (err error) {
 	}
 	Info.Printf("Exiting CacheHandler\n")
 	return nil
-}
+}*/

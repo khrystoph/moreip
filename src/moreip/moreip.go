@@ -69,10 +69,10 @@ func init() {
 
 	flag.StringVar(&domain, "d", "example.com", "enter your fully qualified domain name here. Default: example.com")
 	flag.StringVar(&domain, "domain", "example.com", "enter your fully qualified domain name here. Default: example.com")
-	flag.StringVar(&awsRegion, "region", "us-east-1", "Enter region you wish to connect with. Default: us-east-1")
-	flag.StringVar(&awsRegion, "r", "us-east-1", "Enter region you wish to connect with. Default: us-east-1")
-	flag.StringVar(&s3bucket, "bucket", "moreip.jbecomputersolutions.com", "Enter your s3 bucket to pull from here.")
-	flag.StringVar(&s3bucket, "b", "moreip.jbecomputersolutions.com", "Enter your s3 bucket to pull from here.")
+	flag.StringVar(&awsRegion, "region", "", "Enter region you wish to connect with. Default: \"\"")
+	flag.StringVar(&awsRegion, "r", "", "Enter region you wish to connect with. Default: \"\"")
+	flag.StringVar(&s3bucket, "bucket", "bucket.example.com", "Enter your s3 bucket to pull from here.")
+	flag.StringVar(&s3bucket, "b", "bucket.example.com", "Enter your s3 bucket to pull from here.")
 	flag.StringVar(&filePrefix, "prefix", "certs", "Enter the object prefix where you stored the certs.")
 	flag.StringVar(&sessionProfile, "profile", "default", "enter the profile you wish to use to connect. Default: default")
 	flag.StringVar(&sessionProfile, "p", "default", "enter the profile you wish to use to connect. Default: default")
@@ -83,9 +83,28 @@ func main() {
 
 	s3pstore.FilePrefix = filePrefix
 	s3pstore.S3bucket = s3bucket
+	s3pstore.SessionProfile = sessionProfile
 
 	if domain == "example.com" {
-		Error.Fatal("Please set the domain via domain flag.")
+		if domainenv := os.Getenv("DOMAIN"); domainenv != "" {
+			domain = domainenv
+		} else {
+			Error.Printf("Domain value: %s\n$DOMAIN = %s", domain, domainenv)
+			Error.Fatal("Please set the domain via domain flag or set DOMAIN env var.")
+		}
+	}
+
+	if s3bucket == "bucket.example.com" && os.Getenv("OBJECTBUCKET") == "" {
+		Error.Printf("Bucket value: %s\n$OBJECTBUCKET = %s", s3bucket, os.Getenv("OBJECTBUCKET"))
+		Error.Fatalf("Object bucket not set. Please set OBJECTBUCKET env var or via -b flag")
+	} else if os.Getenv("OBJECTBUCKET") != "" && s3bucket == "bucket.example.com" {
+		s3bucket = os.Getenv("OBJECTBUCKET")
+	}
+
+	if awsRegion == "" && os.Getenv("REGION") == "" {
+		Error.Fatalf("region var and $REGION env var are both empty. Please set the flag OR environment variable.")
+	} else if os.Getenv("REGION") != "" && awsRegion == "" {
+		awsRegion = os.Getenv("REGION")
 	}
 
 	ipv4 := strings.Join([]string{"ipv4", domain}, ".")
@@ -105,22 +124,24 @@ func main() {
 	fileMap := make(map[string]os.FileInfo)
 	cachedObjectsMap := make(map[string]s3.Object)
 
+	//List S3 Objects for use to check whether files should be pulled from cache or not
+	cachedObjects, err := s3pstore.ListObjects(s3bucket, filePrefix)
+	if err != nil {
+		Info.Printf("Error calling list objects: %v\n", err)
+	}
+
 	//if we have file in cache, but not local to filesystem, download it
 	if fileList, err := ioutil.ReadDir("certs"); err != nil {
 		Info.Printf("Had issues reading certs directory\n")
 	} else if len(fileList) > 0 {
-		cachedObjects, err := s3pstore.ListObjects(s3bucket, filePrefix)
-		if err != nil {
-			Info.Printf("Error calling list objects: %v\n", err)
-		}
 		for _, files := range fileList {
 			fileMap[files.Name()] = files
 		}
 		//we want to check if the object that we saw in the cache exists on the filesystem, if not, then we
 		//pull the cert down from the cache into the filesystem. We also want to map the cache objects
 		for _, cacheItem := range cachedObjects.Contents {
-			if _, ok := fileMap[*cacheItem.Key]; ok != true {
-				s3pstore.PullObjects(*cacheItem.Key, "certs/")
+			if _, ok := fileMap[strings.Split(*cacheItem.Key, "certs/")[1]]; ok != true {
+				s3pstore.PullObjects(strings.Split(*cacheItem.Key, "certs/")[1], "certs/")
 			}
 			cachedObjectsMap[*cacheItem.Key] = *cacheItem
 		}
@@ -133,7 +154,9 @@ func main() {
 			}
 		}
 	} else if len(fileList) == 0 {
-		s3pstore.CacheHandler(domain)
+		for _, file := range cachedObjects.Contents {
+			s3pstore.PullObjects(strings.Split(*file.Key, "certs/")[1], "certs/")
+		}
 	}
 
 	certManager := autocert.Manager{
@@ -203,27 +226,6 @@ func main() {
 				}
 			}
 			time.Sleep(sleepConst * time.Second)
-			/*if _, err := os.Stat("certs/" + ipv4); !os.IsNotExist(err) {
-			*	err := s3pstore.CacheHandler(ipv4)
-			*	if err != nil {
-			*		Error.Println(err)
-			*	}
-			*}
-			if _, err := os.Stat("certs/" + ipv6); !os.IsNotExist(err) {
-				err := s3pstore.CacheHandler(ipv6)
-				if err != nil {
-					Error.Println(err)
-				}
-			}
-			Info.Printf("certs/" + domain)
-			if _, err := os.Stat("certs/" + domain); !os.IsNotExist(err) {
-				err := s3pstore.CacheHandler(domain)
-				if err != nil {
-					Error.Println(err)
-				}
-			}
-			time.Sleep(sleepConst * time.Second)
-			*/
 		}
 	}()
 	Info.Printf("Starting the main TLS server.\n")
